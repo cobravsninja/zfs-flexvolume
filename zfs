@@ -1,0 +1,164 @@
+#!/bin/bash
+
+POOL=bashi
+echo "all stuff - " $* >> /tmp/all.log
+usage() {
+	err "Invalid usage. Usage: "
+	err "\t$0 init"
+	err "\t$0 attach <json params> <nodename>"
+	err "\t$0 detach <mount device> <nodename>"
+	err "\t$0 waitforattach <mount device> <json params>"
+	err "\t$0 mountdevice <mount dir> <mount device> <json params>"
+	err "\t$0 unmountdevice <mount dir>"
+	err "\t$0 isattached <json params> <nodename>"
+	exit 1
+}
+
+err() {
+	echo -ne $* 1>&2
+}
+
+log() {
+	echo -ne $* >&1
+}
+
+ismounted() {
+	MOUNT=`findmnt -n ${MNTPATH} 2>/dev/null | cut -d' ' -f1`
+	if [ "${MOUNT}" == "${MNTPATH}" ]; then
+		echo "1"
+	else
+		echo "0"
+	fi
+}
+
+getdevice() {
+	VOLUMEID=$(echo ${JSON_PARAMS} | jq -r '.volumeID')
+	POOL=$(echo ${JSON_PARAMS} | jq -r '.pool')
+	echo $POOL/$VOLUMEID
+}
+
+attach() {
+	JSON_PARAMS=$1
+	VOLUMEID=$(echo ${JSON_PARAMS} | jq -r '.volumeID')
+	POOL=$(echo ${JSON_PARAMS} | jq -r '.pool')
+	QUOTA=$(echo ${JSON_PARAMS} | jq -r '.quota')
+	DEV=$(getdevice)
+	DEVCHECK=$(zfs list | awk "\$1 ~ /^${POOL}\/${VOLUMEID}\$/ {print}")
+
+	if [ "${DEVCHECK}" == "" ]; then
+		zfs create -o mountpoint=none -o quota=${QUOTA} -o compression=lz4 -o atime=off -o relatime=on ${POOL}/${VOLUMEID}
+		if [ "$?" != "0" ]; then
+			err "{\"status\": \"Failure\", \"message\": \"Could not attach ${POOL}/${VOLUMEID}\"}"
+			exit 1
+		fi
+	fi
+	log "{\"status\": \"Success\", \"device\":\"${DEV}\"}"
+	exit 0
+}
+
+detach() {
+	VOLUME=$1
+	zfs destroy ${POOL}/${VOLUME} > /dev/null 2>&1
+	log "{\"status\": \"Success\"}"
+	exit 0
+}
+
+waitforattach() {
+	shift
+	attach $*
+}
+
+domountdevice() {
+	MNTPATH=$1
+	VOLUME=$2
+	VOLUME_AWK=$(echo ${VOLUME} | sed 's/\//\\\//g')
+	ALL_DATA=$*
+	DEVCHECK=$(zfs list | awk "\$1 ~ /^${VOLUME_AWK}\$/ {print}")
+
+	if [ "${DEVCHECK}" == "" ]; then
+		err "{\"status\": \"Failure\", \"message\": \"${POOL}/${VOLUMEID} does not exist\"}"
+		exit 1
+	fi
+
+	if [ $(ismounted) -eq 1 ] ; then
+		log "{\"status\": \"Success\"}"
+		exit 0
+	fi
+
+	mkdir -p ${MNTPATH} &> /dev/null
+
+	zfs set mountpoint=${MNTPATH} ${VOLUME} &> /dev/null
+	
+	if [ $? -ne 0 ]; then
+		err "{ \"status\": \"Failure\", \"message\": \"Failed to mount device ${VOLUME} at ${MNTPATH}\"}"
+		exit 1
+	fi
+	log "{\"status\": \"Success\"}"
+	exit 0
+}
+
+unmountdevice() {
+	MNTPATH=$1
+	if [ ! -d ${MNTPATH} ]; then
+		log "{\"status\": \"Success\"}"
+		exit 0
+	fi
+
+	if [ $(ismounted) -eq 0 ] ; then
+		log "{\"status\": \"Success\"}"
+		exit 0
+	fi
+
+	umount ${MNTPATH} &> /dev/null
+	if [ $? -ne 0 ]; then
+		err "{ \"status\": \"Failed\", \"message\": \"Failed to unmount volume at ${MNTPATH}\"}"
+		exit 1
+	fi
+
+	log "{\"status\": \"Success\"}"
+	exit 0
+}
+
+isattached() {
+	log "{\"status\": \"Success\", \"attached\":true}"
+	exit 0
+}
+
+op=$1
+
+if [ "$op" = "init" ]; then
+	log "{\"status\": \"Success\"}"
+	exit 0
+fi
+
+if [ $# -lt 2 ]; then
+	usage
+fi
+
+shift
+
+case "$op" in
+	attach)
+		attach $*
+		;;
+	detach)
+		detach $*
+		;;
+	waitforattach)
+		waitforattach $*
+		;;
+	mountdevice)
+		domountdevice $*
+		;;
+	unmountdevice)
+		unmountdevice $*
+		;;
+	isattached)
+                isattached $*
+                ;;
+	*)
+		log "{ \"status\": \"Not supported\" }"
+		exit 0
+esac
+
+exit 1
